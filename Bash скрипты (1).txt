@@ -1,0 +1,285 @@
+﻿Ниже — несколько полезных bash-скриптов для разных задач. Каждый скрипт содержит краткое описание и пример использования. Перед запуском проверьте и при необходимости адаптируйте под вашу среду.
+
+
+Резервное копирование директории с ротацией (хранить N последних бэкапов)
+
+
+ 
+#!/usr/bin/env bash
+set -euo pipefail
+
+
+# backup_dir.sh
+# Usage: backup_dir.sh /path/to/dir /path/to/backup_dir 7
+# where 7 — количество бэкапов, которые нужно хранить
+
+
+SRC_DIR="${1:-}"
+DEST_DIR="${2:-}"
+KEEP="${3:-7}"
+
+
+if [[ -z "$SRC_DIR" || -z "$DEST_DIR" ]]; then
+  echo "Usage: $0 /path/to/dir /path/to/backup_dir <keep>"
+  exit 2
+fi
+
+
+mkdir -p "$DEST_DIR"
+
+
+TS=$(date +"%Y%m%dT%H%M%S")
+BASENAME="$(basename "$SRC_DIR")"
+ARCHIVE="$DEST_DIR/${BASENAME}_${TS}.tar.gz"
+
+
+tar -czf "$ARCHIVE" -C "$(dirname "$SRC_DIR")" "$BASENAME"
+echo "Created $ARCHIVE"
+
+
+# Ротация: удаляем старые
+ls -1t "$DEST_DIR"/"${BASENAME}"_*.tar.gz 2>/dev/null | sed -n "$((KEEP+1)),\$p" | while read -r f; do
+  rm -f -- "$f" && echo "Removed old backup $f"
+done || true
+ 
+
+
+Простая ротация логов: сжатие старых логов и удаление по возрасту
+
+ 
+#!/usr/bin/env bash
+set -euo pipefail
+
+
+# rotate_logs.sh
+# Usage: rotate_logs.sh /var/log/myapp "*.log" 30
+# 3 args: dir, pattern, max_age_days
+
+
+DIR="${1:-/var/log}"
+PATTERN="${2:-*.log}"
+MAX_AGE_DAYS="${3:-30}"
+
+
+find "$DIR" -maxdepth 1 -type f -name "$PATTERN" -mtime +"$MAX_AGE_DAYS" -print0 |
+  while IFS= read -r -d '' file; do
+    gzip -9 -- "$file" && echo "Compressed $file"
+  done
+ 
+
+
+Поиск больших файлов (с опцией удаления — осторожно!)
+
+
+ 
+#!/usr/bin/env bash
+set -euo pipefail
+
+
+# find_large_files.sh
+# Usage: find_large_files.sh /path/to/search 100M [--delete]
+DIR="${1:-.}"
+SIZE="${2:-100M}"
+DELETE_FLAG="${3:-}"
+
+
+echo "Searching for files in $DIR larger than $SIZE"
+find "$DIR" -type f -size +"$SIZE" -print0 |
+  while IFS= read -r -d '' f; do
+    ls -lh -- "$f"
+    if [[ "$DELETE_FLAG" == "--delete" ]]; then
+      echo "Deleting $f"
+      rm -f -- "$f"
+    fi
+  done
+ 
+
+
+Мониторинг процесса и рестарт systemd-сервиса при падении
+
+
+ 
+#!/usr/bin/env bash
+set -euo pipefail
+
+
+# watch_and_restart.sh
+# Usage: watch_and_restart.sh myservice 30
+# два аргумента: имя systemd-сервиса (example.service) и интервал в секундах
+
+
+SERVICE="${1:-}"
+INTERVAL="${2:-10}"
+
+
+if [[ -z "$SERVICE" ]]; then
+  echo "Usage: $0 <service.name> <interval_seconds>"
+  exit 2
+fi
+
+
+while true; do
+  if systemctl is-active --quiet "$SERVICE"; then
+    # всё ок
+    sleep "$INTERVAL"
+    continue
+  fi
+
+
+  echo "$(date): $SERVICE is not active, attempting restart"
+  if systemctl restart "$SERVICE"; then
+    echo "$(date): Restarted $SERVICE successfully"
+  else
+    echo "$(date): Failed to restart $SERVICE" >&2
+  fi
+
+
+  sleep "$INTERVAL"
+done
+ 
+
+
+Примечание: для управления systemd требуется соответствующие права (обычно root).
+
+
+Авто-pull для git-репозитория с безопасной обработкой локальных изменений
+
+
+ 
+#!/usr/bin/env bash
+set -euo pipefail
+
+
+# git_auto_pull.sh
+# Usage: git_auto_pull.sh /path/to/repo [post-deploy-cmd]
+REPO_DIR="${1:-}"
+POST_CMD="${2:-}"
+
+
+if [[ -z "$REPO_DIR" ]]; then
+  echo "Usage: $0 /path/to/repo [post-deploy-cmd]"
+  exit 2
+fi
+
+
+cd "$REPO_DIR"
+
+
+# Сохраняем текущие изменения временным stash, но только если есть что стэшить
+if ! git diff --quiet || ! git diff --cached --quiet; then
+  STASHED=1
+  git stash push -u -m "auto-stash-$(date +%s)"
+  echo "Local changes stashed"
+else
+  STASHED=0
+fi
+
+
+git fetch --all --prune
+git pull --ff-only || {
+  echo "Fast-forward pull failed. Manual intervention required." >&2
+  # Восстановим stash, если был
+  [[ "$STASHED" -eq 1 ]] && git stash pop --quiet || true
+  exit 1
+}
+
+
+# Попытаться вернуть stash, если был
+if [[ "$STASHED" -eq 1 ]]; then
+  git stash pop || echo "Conflict when popping stash; please resolve manually"
+fi
+
+
+# Выполнить опциональную команду (например: systemctl restart myapp)
+if [[ -n "$POST_CMD" ]]; then
+  echo "Running post-deploy command: $POST_CMD"
+  bash -c "$POST_CMD"
+fi
+
+
+echo "Update finished"
+ 
+
+
+Пакетовое переименование: замена пробелов на подчеркивания (с dry-run)
+
+
+ 
+#!/usr/bin/env bash
+set -euo pipefail
+
+
+# batch_rename.sh
+# Usage: batch_rename.sh /path/to/dir [--apply]
+# По умолчанию — dry-run. С флагом --apply — выполняет переименование.
+
+
+DIR="${1:-.}"
+APPLY=0
+if [[ "${2:-}" == "--apply" ]]; then APPLY=1; fi
+
+
+find "$DIR" -maxdepth 1 -type f -print0 |
+  while IFS= read -r -d '' f; do
+    base="$(basename "$f")"
+    new="${base// /_}"
+    if [[ "$new" != "$base" ]]; then
+      echo "$base -> $new"
+      if [[ $APPLY -eq 1 ]]; then
+        mv -- "$f" "$(dirname "$f")/$new"
+      fi
+    fi
+  done
+ 
+
+
+Монитор памяти и логирование/уведомление (пишет в лог и при пороге — выводит сообщение)
+
+
+ 
+#!/usr/bin/env bash
+set -euo pipefail
+
+
+# monitor_memory.sh
+# Usage: monitor_memory.sh 80 /var/log/mem_alert.log
+THRESHOLD_PERCENT="${1:-80}"
+LOGFILE="${2:-/var/log/mem_alert.log}"
+
+
+while true; do
+  # Используем free для получения использования памяти
+  read -r total used free shared buff cache available < <(free -m | awk 'NR==2{print $2,$3,$4,$5,$6,$7,$7}')
+  used_percent=$(( (used * 100) / total ))
+
+
+  timestamp="$(date +'%Y-%m-%d %H:%M:%S')"
+  echo "$timestamp Memory used: ${used}MB/${total}MB (${used_percent}%)" >> "$LOGFILE"
+
+
+  if (( used_percent >= THRESHOLD_PERCENT )); then
+    echo "$timestamp ALERT: memory usage is ${used_percent}% (>= ${THRESHOLD_PERCENT}%)" | tee -a "$LOGFILE"
+    # Здесь можно интегрировать отправку письма или webhook.
+  fi
+
+
+  sleep 60
+done
+ 
+
+
+Дополнительные рекомендации
+
+
+Всегда проверяйте скрипты сначала в тестовой среде (особенно те, что удаляют файлы).
+Добавляйте логирование и возможность dry-run у операций, меняющих файлы.
+Для многопользовательских систем используйте systemd unit для запуска демонов/мониторов.
+Поддерживайте set -euo pipefail и проверяйте входные параметры.
+
+
+Если нужно — могу:
+
+
+адаптировать любой из скриптов под ваши требования;
+добавить systemd unit-файл для автостарта мониторинга;
+сделать версию скрипта с подробной обработкой ошибок и логированием в JSON.
